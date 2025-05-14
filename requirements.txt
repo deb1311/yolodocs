@@ -1,5 +1,5 @@
-# requirements.txt
-doclayout-yolo==0.0.2
+
+git+https://github.com/opendatalab/DocLayout-YOLO.git
 gradio==5.1.0
 gradio-client==1.4.0
 huggingface_hub
