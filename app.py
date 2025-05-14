@@ -10,7 +10,7 @@ import io
 import os
 import matplotlib.pyplot as plt
 import pandas as pd
-from pathlib import Path  # Fixed from "pathly" to "pathlib"
+from pathlib import Path
 import json
 
 # Create directories if they don't exist
@@ -37,8 +37,19 @@ CLASSES = ["Caption", "Footnote", "Formula", "List-item", "Page-footer", "Page-h
 # Define visual elements we want to extract
 VISUAL_ELEMENTS = ["Picture", "Caption", "Table", "Formula"]
 
-# Define colors for visualization
-COLORS = sv.ColorPalette.default()
+# Define colors for visualization - Fix for ColorPalette issue
+# Use the sv.ColorPalette directly or create a custom color palette based on supervision version
+try:
+    # Try newer versions approach
+    COLORS = sv.ColorPalette.default()
+except (AttributeError, TypeError):
+    try:
+        # Try alternate approach for some versions
+        COLORS = sv.ColorPalette.from_hex(["#FF0000", "#00FF00", "#0000FF", "#FFFF00", "#FF00FF", "#00FFFF", 
+                                         "#FFA500", "#800080", "#008000", "#000080", "#808080"])
+    except (AttributeError, TypeError):
+        # Fallback for older versions or different API
+        COLORS = sv.ColorPalette(11)  # Create a color palette with 11 colors (one for each class)
 
 # Set up the annotator
 box_annotator = sv.BoxAnnotator(color=COLORS)
@@ -60,7 +71,21 @@ def predict_layout(image):
     results = model(img)[0]
     
     # Format detections
-    detections = sv.Detections.from_ultralytics(results)
+    try:
+        # Try with newer supervision versions
+        detections = sv.Detections.from_ultralytics(results)
+    except (TypeError, AttributeError):
+        # Fallback for older versions
+        boxes = results.boxes.xyxy.cpu().numpy()
+        confidence = results.boxes.conf.cpu().numpy()
+        class_ids = results.boxes.cls.cpu().numpy().astype(int)
+        
+        # Create Detections object manually
+        detections = sv.Detections(
+            xyxy=boxes,
+            confidence=confidence,
+            class_id=class_ids
+        )
     
     # Get class names
     class_ids = detections.class_id
@@ -80,7 +105,6 @@ def predict_layout(image):
         class_name = CLASSES[class_id]
         
         # Include all visual elements (Pictures, Captions, Tables, Formulas)
-        # You can add or remove classes based on what you consider "visual elements"
         if class_name in VISUAL_ELEMENTS:
             x1, y1, x2, y2 = map(int, xyxy)
             width = x2 - x1
@@ -178,4 +202,5 @@ with gr.Blocks() as demo:
         inputs=input_image
     )
 
-demo.launch()
+if __name__ == "__main__":
+    demo.launch()
