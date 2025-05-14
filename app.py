@@ -1,197 +1,223 @@
-import gradio as gr
-import torch
-import cv2
-import numpy as np
-import supervision as sv
-from ultralytics import YOLO
-from PIL import Image
-import requests
-import io
 import os
-import matplotlib.pyplot as plt
-import pandas as pd
-from pathlib import Path
-import json
+os.environ["GRADIO_TEMP_DIR"] = "./tmp"
 
-# Create directories if they don't exist
+import sys
+import torch
+import torchvision
+import gradio as gr
+import numpy as np
+from PIL import Image
+from huggingface_hub import snapshot_download
+from visualization import visualize_bbox
+
+# Create necessary directories
+os.makedirs("tmp", exist_ok=True)
 os.makedirs("models", exist_ok=True)
 
-# Download model if it doesn't exist
-model_path = "models/yolov8n-doclaynet.pt"
-if not os.path.exists(model_path):
-    url = "https://huggingface.co/datasets/awsaf49/yolov8-doclaynet/resolve/main/yolov8n-doclaynet.pt"
-    print(f"Downloading smaller model from {url}...")
-    r = requests.get(url)
-    with open(model_path, 'wb') as f:
-        f.write(r.content)
-    print(f"Model downloaded to {model_path}")
+# Define class mapping
+id_to_names = {
+    0: 'title', 
+    1: 'plain text',
+    2: 'abandon', 
+    3: 'figure', 
+    4: 'figure_caption', 
+    5: 'table', 
+    6: 'table_caption', 
+    7: 'table_footnote', 
+    8: 'isolate_formula', 
+    9: 'formula_caption'
+}
 
-# Load the model
-model = YOLO(model_path)
-print("Model loaded successfully!")
+# Visual elements for extraction (can be customized)
+VISUAL_ELEMENTS = ['figure', 'table', 'figure_caption', 'table_caption', 'isolate_formula']
 
-# Define classes (from DocLayNet dataset)
-CLASSES = ["Caption", "Footnote", "Formula", "List-item", "Page-footer", "Page-header", 
-           "Picture", "Section-header", "Table", "Text", "Title"]
-
-# Define visual elements we want to extract
-VISUAL_ELEMENTS = ["Picture", "Caption", "Table", "Formula"]
-
-# Define colors for visualization - Fix for ColorPalette issue
-try:
-    # Try newer versions approach
-    COLORS = sv.ColorPalette.default()
-except (AttributeError, TypeError):
+def load_model():
+    """Load the DocLayout-YOLO model from Hugging Face"""
     try:
-        # Try alternate approach for some versions
-        COLORS = sv.ColorPalette.from_hex(["#FF0000", "#00FF00", "#0000FF", "#FFFF00", "#FF00FF", "#00FFFF", 
-                                         "#FFA500", "#800080", "#008000", "#000080", "#808080"])
-    except (AttributeError, TypeError):
-        # Fallback for older versions or different API
-        COLORS = sv.ColorPalette(11)  # Create a color palette with 11 colors (one for each class)
-
-# Set up the annotator
-box_annotator = sv.BoxAnnotator(color=COLORS)
-
-def predict_layout(image):
-    if image is None:
-        return None, None, None
-    
-    # Convert to numpy array if it's not already
-    if isinstance(image, np.ndarray):
-        img = image
-    else:
-        img = np.array(image)
-    
-    # Get image dimensions
-    img_height, img_width = img.shape[:2]
-    
-    # Run inference
-    results = model(img)[0]
-    
-    # Format detections
-    try:
-        # Try with newer supervision versions
-        detections = sv.Detections.from_ultralytics(results)
-    except (TypeError, AttributeError):
-        # Fallback for older versions
-        boxes = results.boxes.xyxy.cpu().numpy()
-        confidence = results.boxes.conf.cpu().numpy()
-        class_ids = results.boxes.cls.cpu().numpy().astype(int)
-        
-        # Create Detections object manually
-        detections = sv.Detections(
-            xyxy=boxes,
-            confidence=confidence,
-            class_id=class_ids
+        # Download model weights if they don't exist
+        model_dir = snapshot_download(
+            'juliozhao/DocLayout-YOLO-DocStructBench', 
+            local_dir='./models/DocLayout-YOLO-DocStructBench'
         )
-    
-    # Get class names
-    class_ids = detections.class_id
-    labels = [f"{CLASSES[class_id]} {confidence:.2f}" 
-              for class_id, confidence in zip(class_ids, detections.confidence)]
-    
-    # Get annotated frame
-    annotated_image = box_annotator.annotate(
-        scene=img.copy(), 
-        detections=detections,
-        labels=labels
-    )
-    
-    # Extract bounding boxes for all visual elements
-    boxes_data = []
-    for i, (class_id, xyxy, confidence) in enumerate(zip(detections.class_id, detections.xyxy, detections.confidence)):
-        class_name = CLASSES[class_id]
         
-        # Include all visual elements (Pictures, Captions, Tables, Formulas)
-        if class_name in VISUAL_ELEMENTS:
-            x1, y1, x2, y2 = map(int, xyxy)
-            width = x2 - x1
-            height = y2 - y1
+        # Select device
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        print(f"Using device: {device}")
+        
+        # Import and load the model
+        from doclayout_yolo import YOLOv10
+        model = YOLOv10(os.path.join(
+            os.path.dirname(__file__), 
+            "models", 
+            "DocLayout-YOLO-DocStructBench", 
+            "doclayout_yolo_docstructbench_imgsz1024.pt"
+        ))
+        
+        return model, device
+        
+    except Exception as e:
+        print(f"Error loading model: {e}")
+        return None, 'cpu'
+
+def recognize_image(input_img, conf_threshold, iou_threshold):
+    """Process input image and detect document elements"""
+    if input_img is None:
+        return None, None
+    
+    try:
+        # Load model (global model if already loaded)
+        global model, device
+        
+        # Run prediction
+        det_res = model.predict(
+            input_img,
+            imgsz=1024,
+            conf=conf_threshold,
+            device=device,
+        )[0]
+        
+        # Extract detection results
+        boxes = det_res.__dict__['boxes'].xyxy
+        classes = det_res.__dict__['boxes'].cls
+        scores = det_res.__dict__['boxes'].conf
+        
+        # Apply non-maximum suppression
+        indices = torchvision.ops.nms(
+            boxes=torch.Tensor(boxes), 
+            scores=torch.Tensor(scores),
+            iou_threshold=iou_threshold
+        )
+        
+        boxes, scores, classes = boxes[indices], scores[indices], classes[indices]
+        
+        # Handle single detection case
+        if len(boxes.shape) == 1:
+            boxes = np.expand_dims(boxes, 0)
+            scores = np.expand_dims(scores, 0)
+            classes = np.expand_dims(classes, 0)
             
-            boxes_data.append({
-                "class": class_name,
-                "confidence": float(confidence),
-                "x1": int(x1),
-                "y1": int(y1),
-                "x2": int(x2),
-                "y2": int(y2),
-                "width": int(width),
-                "height": int(height)
-            })
-    
-    # Create DataFrame for display
-    if boxes_data:
-        df = pd.DataFrame(boxes_data)
-        df = df[["class", "confidence", "x1", "y1", "x2", "y2", "width", "height"]]
-    else:
-        df = pd.DataFrame(columns=["class", "confidence", "x1", "y1", "x2", "y2", "width", "height"])
-    
-    # Convert to JSON for download
-    json_data = json.dumps(boxes_data, indent=2)
-    
-    return annotated_image, df, json_data
-
-# Function to download JSON
-def download_json(json_data):
-    if not json_data:
-        return None
-    return json_data
-
-# Set up the Gradio interface
-with gr.Blocks() as demo:
-    gr.Markdown("# Document Layout Analysis for Visual Elements (YOLOv8n)")
-    gr.Markdown("Upload a document image to extract visual elements including diagrams, tables, formulas, and captions.")
-    
-    with gr.Row():
-        with gr.Column():
-            input_image = gr.Image(label="Input Document")
-            analyze_btn = gr.Button("Analyze Layout", variant="primary")
+        # Visualize results
+        vis_result = visualize_bbox(input_img, boxes, classes, scores, id_to_names)
         
-        with gr.Column():
-            output_image = gr.Image(label="Detected Layout")
-    
-    with gr.Row():
-        with gr.Column():
-            output_table = gr.DataFrame(label="Visual Elements Bounding Boxes")
-            json_output = gr.JSON(label="JSON Output")
-            download_btn = gr.Button("Download JSON")
-            json_file = gr.File(label="Download JSON File", interactive=False)
-    
-    analyze_btn.click(
-        fn=predict_layout,
-        inputs=input_image,
-        outputs=[output_image, output_table, json_output]
-    )
-    
-    download_btn.click(
-        fn=download_json,
-        inputs=[json_output],
-        outputs=[json_file]
-    )
-    
-    gr.Markdown("## Detected Visual Elements")
-    gr.Markdown("""
-    This application detects and extracts coordinates for the following visual elements:
-    
-    - **Pictures**: Diagrams, photos, illustrations, flowcharts, etc.
-    - **Tables**: Structured data presented in rows and columns
-    - **Formulas**: Mathematical equations and expressions
-    - **Captions**: Text describing pictures or tables
-    
-    For each element, the system returns:
-    - Element type (class)
-    - Confidence score (0-1)
-    - Coordinates (x1, y1, x2, y2)
-    - Width and height in pixels
-    """)
-    
-    gr.Markdown("## About")
-    gr.Markdown("""
-    This demo uses YOLOv8n for document layout analysis, with a focus on extracting visual elements.
-    The model is a smaller, more efficient version trained on the DocLayNet dataset.
-    """)
+        # Create DataFrame for extraction
+        elements_data = []
+        for i, (box, cls_id, score) in enumerate(zip(boxes, classes, scores)):
+            class_name = id_to_names[int(cls_id)]
+            
+            # Only extract visual elements if specified
+            if not VISUAL_ELEMENTS or class_name in VISUAL_ELEMENTS:
+                x1, y1, x2, y2 = map(int, box)
+                width = x2 - x1
+                height = y2 - y1
+                
+                elements_data.append({
+                    "class": class_name,
+                    "confidence": float(score),
+                    "x1": x1,
+                    "y1": y1,
+                    "x2": x2,
+                    "y2": y2,
+                    "width": width,
+                    "height": height
+                })
+        
+        # Convert to DataFrame for display
+        import pandas as pd
+        if elements_data:
+            df = pd.DataFrame(elements_data)
+            df = df[["class", "confidence", "x1", "y1", "x2", "y2", "width", "height"]]
+        else:
+            df = pd.DataFrame(columns=["class", "confidence", "x1", "y1", "x2", "y2", "width", "height"])
+        
+        return vis_result, df
+        
+    except Exception as e:
+        print(f"Error processing image: {e}")
+        import traceback
+        traceback.print_exc()
+        return None, None
 
+def gradio_reset():
+    """Reset the UI"""
+    return gr.update(value=None), gr.update(value=None), gr.update(value=None)
+
+# Create basic HTML header
+header_html = """
+<div style="text-align: center; max-width: 900px; margin: 0 auto;">
+    <div>
+        <h1 style="font-weight: 900; margin-bottom: 7px;">
+            Document Layout Analysis
+        </h1>
+        <p style="margin-top: 7px; font-size: 94%;">
+            Detect and extract structured elements from document images using DocLayout-YOLO
+        </p>
+    </div>
+</div>
+"""
+
+# Main execution
 if __name__ == "__main__":
-    # Specify a lower queue_size and a maximum number of connections to limit memory use
-    demo.launch(share=True, max_threads=1, queue_size=5)
+    # Load model
+    model, device = load_model()
+    
+    # Create Gradio interface
+    with gr.Blocks() as demo:
+        gr.HTML(header_html)
+        
+        with gr.Row():
+            with gr.Column():
+                input_img = gr.Image(label="Upload Document Image", interactive=True)
+                
+                with gr.Row():
+                    clear_btn = gr.Button(value="Clear")
+                    predict_btn = gr.Button(value="Detect Elements", interactive=True, variant="primary")
+                
+                with gr.Row():
+                    conf_threshold = gr.Slider(
+                        label="Confidence Threshold",
+                        minimum=0.0,
+                        maximum=1.0,
+                        step=0.05,
+                        value=0.25,
+                    )
+                    
+                    iou_threshold = gr.Slider(
+                        label="NMS IOU Threshold",
+                        minimum=0.0,
+                        maximum=1.0,
+                        step=0.05,
+                        value=0.45,
+                    )
+            
+            with gr.Column():
+                output_img = gr.Image(label="Detection Result", interactive=False)
+                output_table = gr.DataFrame(label="Detected Visual Elements")
+        
+        with gr.Row():
+            gr.Markdown("""
+            ## Detected Elements
+            This application detects and extracts the following elements from document images:
+            
+            - **Title**: Document and section titles
+            - **Plain Text**: Regular paragraph text
+            - **Figure**: Images, charts, diagrams, etc.
+            - **Figure Caption**: Text describing figures
+            - **Table**: Tabular data structures
+            - **Table Caption**: Text describing tables
+            - **Table Footnote**: Notes below tables
+            - **Formula**: Mathematical equations
+            - **Formula Caption**: Text describing formulas
+            
+            For each element, the system returns coordinates and confidence scores.
+            """)
+        
+        # Connect events
+        clear_btn.click(gradio_reset, inputs=None, outputs=[input_img, output_img, output_table])
+        predict_btn.click(
+            recognize_image, 
+            inputs=[input_img, conf_threshold, iou_threshold], 
+            outputs=[output_img, output_table]
+        )
+        
+    # Launch the interface
+    demo.launch(share=True, server_name="0.0.0.0", server_port=7860)
