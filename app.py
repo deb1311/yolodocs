@@ -17,10 +17,10 @@ import json
 os.makedirs("models", exist_ok=True)
 
 # Download model if it doesn't exist
-model_path = "models/yolov11x_best.pt"
+model_path = "models/yolov8n-doclaynet.pt"
 if not os.path.exists(model_path):
-    url = "https://github.com/moured/YOLOv11-Document-Layout-Analysis/releases/download/doclaynet_weights/yolov11x_best.pt"
-    print(f"Downloading model from {url}...")
+    url = "https://huggingface.co/datasets/awsaf49/yolov8-doclaynet/resolve/main/yolov8n-doclaynet.pt"
+    print(f"Downloading smaller model from {url}...")
     r = requests.get(url)
     with open(model_path, 'wb') as f:
         f.write(r.content)
@@ -38,7 +38,6 @@ CLASSES = ["Caption", "Footnote", "Formula", "List-item", "Page-footer", "Page-h
 VISUAL_ELEMENTS = ["Picture", "Caption", "Table", "Formula"]
 
 # Define colors for visualization - Fix for ColorPalette issue
-# Use the sv.ColorPalette directly or create a custom color palette based on supervision version
 try:
     # Try newer versions approach
     COLORS = sv.ColorPalette.default()
@@ -141,7 +140,7 @@ def download_json(json_data):
 
 # Set up the Gradio interface
 with gr.Blocks() as demo:
-    gr.Markdown("# YOLOv11x Document Layout Analysis for Visual Elements")
+    gr.Markdown("# Document Layout Analysis for Visual Elements (YOLOv8n)")
     gr.Markdown("Upload a document image to extract visual elements including diagrams, tables, formulas, and captions.")
     
     with gr.Row():
@@ -189,11 +188,10 @@ with gr.Blocks() as demo:
     
     gr.Markdown("## About")
     gr.Markdown("""
-    This demo uses YOLOv11x for document layout analysis, with a focus on extracting visual elements.
-    Model from [moured/YOLOv11-Document-Layout-Analysis](https://github.com/moured/YOLOv11-Document-Layout-Analysis)
+    This demo uses YOLOv8n for document layout analysis, with a focus on extracting visual elements.
+    The model is a smaller, more efficient version trained on the DocLayNet dataset.
     """)
-    
-    
 
 if __name__ == "__main__":
-    demo.launch()
+    # Specify a lower queue_size and a maximum number of connections to limit memory use
+    demo.launch(share=True, max_threads=1, queue_size=5)
