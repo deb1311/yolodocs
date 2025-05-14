@@ -193,14 +193,7 @@ with gr.Blocks() as demo:
     Model from [moured/YOLOv11-Document-Layout-Analysis](https://github.com/moured/YOLOv11-Document-Layout-Analysis)
     """)
     
-    # Add example images
-    gr.Examples(
-        examples=[
-            "https://raw.githubusercontent.com/moured/YOLOv11-Document-Layout-Analysis/main/assets/sample1.png",
-            "https://raw.githubusercontent.com/moured/YOLOv11-Document-Layout-Analysis/main/assets/sample2.png",
-        ],
-        inputs=input_image
-    )
+    
 
 if __name__ == "__main__":
     demo.launch()
