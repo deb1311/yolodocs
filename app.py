@@ -10,7 +10,7 @@ import io
 import os
 import matplotlib.pyplot as plt
 import pandas as pd
-from pathly import Path
+from pathlib import Path  # Fixed from "pathly" to "pathlib"
 import json
 
 # Create directories if they don't exist
